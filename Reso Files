@@ -1,0 +1,686 @@
+// Reso source: example.reso
+
+// Import THRML-compatible modules
+import prob from "thrml.core"
+import hardware from "extropic.tsu"
+
+// Define a class for probabilistic nodes (OOP)
+class PNode inherits prob.Node {
+    state: Tensor<f32>  // or p-bit / discrete states
+    energy: func  // energy function
+
+    method init(temp: f64 = 1.0) {
+        this.state = rand_uniform(-1.0, 1.0)
+        this.temp = temp
+    }
+
+    method flip() -> bool {
+        // Gibbs-inspired local update
+        return sample_bernoulli(softmax(this.energy()))
+    }
+}
+
+// Hypergraphical Model - like a Linux "system"
+model IsingModel {
+    path: "/models/ising2d"
+
+    // Nodes as resources
+    nodes: array<PNode> = grid(10, 10)  // 10x10 lattice
+
+    // Factors (interactions)
+    factors coupling {
+        type: "pairwise"
+        strength: J = -1.0  // ferromagnetic
+        neighbors: 4-connectivity
+    }
+
+    // Energy function (THRML compatible)
+    energy() -> f64 {
+        return sum_over_edges( nodes[i].state * nodes[j].state * coupling.J )
+    }
+}
+
+// Hardware target
+hw: Hardware = new extropic.TSU {
+    cores: 1024
+    precision: "p-bit"
+    mode: "block_gibbs"
+}
+
+// Main program - Linux-like pipeline
+program main() {
+    sys = load("/models/ising2d")
+
+    // Train or sample with pipeline
+    samples = sys
+        | train(epochs=1000, optimizer=adam)
+        | sample(steps=5000, block_size=64, hardware=hw)
+        | observe("/stats/magnetization")
+
+    // Output to file (Linux style)
+    samples > "results/magnetization.dat"
+
+    // Or visualize
+    plot(samples) | render("ising_heatmap.png") model Potts {
+    q: int = 4  // 4 states
+    nodes = grid(50, 50, state_type="discrete", states=q)
+
+    factor interaction {
+        J = 1.0
+        on(nodes.neighbors)
+    }
+
+    run sampling on hw {
+        steps: 10000
+        temp_schedule: linear(2.5 -> 0.1)
+    }
+}
+}// forge.reso — Core import
+import forge from "resocore.forge"
+import dtm from "forge.models.denoising"
+import hybrid from "forge.hybrid" forge mount cluster:/tsu-fleet1 {
+    nodes: 250_000 pbits
+    topology: sparse_small_world
+    precision: mixed_pbit
+    temp: dynamic_schedule
+}
+
+model WorldModel inherits dtm.DenoisingThermoModel {
+    path: "/foundation/worldmodel-v1"
+
+    scale: {
+        spatial: 1024x1024x1024  // latent hypergraph dimensions
+        temporal: continuous
+    }
+
+    // Auto-generated hierarchical factors
+    factors {
+        local: auto_discover( neighborhood=8, type="ising-like" )
+        long_range: transformer_attention_mapped  // hybrid projection to TSU
+        multimodal: fusion( vision, language, physics )
+    }
+
+    // Energy is composable and differentiable where needed
+    energy() {
+        return base_denoising_energy() 
+             + physics_constraints() 
+             + learned_priors()
+    }
+}program train_foundation() {
+    dataset = load("/data/multimodal/cosmos") 
+
+    trained = dataset
+        | forge.preprocess(scale="adaptive")
+        | WorldModel.new()
+        | hybrid.train(
+            epochs=5000,
+            tsu_fleet=cluster:/tsu-fleet1,
+            gpu_fallback=fallback:/jax-cluster,
+            optimizer=thermo_adam  // custom thermodynamic-aware
+          )
+        | forge.evolve( generations=50, mutation_rate=0.01 )  // architecture search
+        | evaluate( benchmarks=["physics", "generation", "planning"] )
+        | deploy( version="v1.0", canary=true )
+
+    trained > "/models/deployed/worldmodel-v1"
+} class VideoGenerator inherits dtm.DTM {
+    dimensions: [temporal=256, spatial=512, channels=3]
+
+    run on cluster:/tsu-fleet1 {
+        denoising_steps: 50
+        parallel_chains: 1024
+        temp_cooling: exponential(2.0 -> 0.05)
+    }
+
+    hybrid_projection() {  // map high-level guidance to TSU
+        return transformer_encoder() | compress_to_pbit_factors()
+    }
+}pip install thrml jax jaxlib numpy matplotlib import jax
+import jax.numpy as jnp
+from thrml import SpinNode, Block, SamplingSchedule, sample_states
+from thrml.models import IsingEBM, IsingSamplingProgram, hinton_init
+import numpy as np
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Callable, List, Any
+import functools
+
+# ====================== Reso-like Core ======================
+
+class Resource:
+    """Base for everything in the Reso filesystem-like world"""
+    def __init__(self, path: str):
+        self.path = path
+        self._children = {}
+
+    def mount(self, name: str, child):
+        self._children[name] = child
+
+class Hardware(Resource):
+    def __init__(self, path: str, target: str = "sim"):
+        super().__init__(path)
+        self.target = target  # "sim", "tsu", "hybrid"
+
+class Model(Resource):
+    def __init__(self, path: str, nodes=None, factors=None):
+        super().__init__(path)
+        self.nodes = nodes or []
+        self.factors = factors or []
+        self.energy_fn: Callable = lambda states: jnp.array(0.0)
+
+    def energy(self, states):
+        return self.energy_fn(states)
+
+    def __or__(self, other):  # Pipeline syntax: model | operation
+        if callable(other):
+            return other(self)
+        return self
+
+# ====================== Forge Core ======================
+
+class Forge:
+    """The Thermodynamic OS"""
+    def __init__(self):
+        self.cluster = Hardware("/cluster/default", "sim")
+        self.models = {}
+
+    def mount(self, path: str, resource):
+        # Simple mount for demo
+        print(f"Mounted {type(resource).__name__} at {path}")
+        if isinstance(resource, Model):
+            self.models[path] = resource
+
+    def train(self, epochs=100, **kwargs):
+        def _train(model: Model):
+            print(f"Training {model.path} for {epochs} epochs on {self.cluster.target}")
+            # Placeholder: in real version, optimize energy params via JAX
+            return model
+        return _train
+
+    def sample(self, steps=1000, block_size=32, **kwargs):
+        def _sample(model: Model):
+            print(f"Sampling {steps} steps from {model.path}")
+            # Real THRML usage
+            if isinstance(model, IsingModel):  # Demo integration
+                return model._run_thrml_sampling(steps)
+            return jnp.zeros((steps, len(model.nodes)))  # fallback
+        return _sample
+
+    def evolve(self, generations=10, mutation_rate=0.05):
+        def _evolve(model):
+            print(f"Evolving architecture over {generations} generations (AutoForge)")
+            # Simple mutation demo
+            return model
+        return _evolve
+
+forge = Forge()
+
+# ====================== Concrete Models ======================
+
+class IsingModel(Model):
+    def __init__(self, path: str, size: int = 20, J: float = -1.0):
+        super().__init__(path)
+        self.size = size
+        self.J = J
+        self.nodes = [SpinNode() for _ in range(size)]
+
+        # Simple 1D chain for demo
+        edges = [(self.nodes[i], self.nodes[(i+1)%size]) for i in range(size)]
+        biases = jnp.zeros((size,))
+        weights = jnp.full((size,), J)
+
+        self._ebm = IsingEBM(self.nodes, edges, biases, weights, beta=jnp.array(1.0))
+        self.free_blocks = [Block(self.nodes[::2]), Block(self.nodes[1::2])]
+
+    def _run_thrml_sampling(self, n_samples=1000):
+        program = IsingSamplingProgram(self._ebm, self.free_blocks, clamped_blocks=[])
+        key = jax.random.key(42)
+        k_init, k_samp = jax.random.split(key, 2)
+        init_state = hinton_init(k_init, self._ebm, self.free_blocks, ())
+        schedule = SamplingSchedule(n_warmup=200, n_samples=n_samples, steps_per_sample=5)
+        samples = sample_states(k_samp, program, schedule, init_state, [], [Block(self.nodes)])
+        return samples
+
+# ====================== Pipeline Helpers ======================
+
+def observe(stat: str):
+    def _observe(model_or_samples):
+        print(f"Observing {stat}")
+        if isinstance(model_or_samples, jnp.ndarray):  # samples
+            mag = jnp.mean(model_or_samples, axis=1)
+            plt.plot(mag)
+            plt.title("Magnetization")
+            plt.show()
+        return model_or_samples
+    return _observe
+
+def deploy(version="v1.0"):
+    def _deploy(model):
+        print(f"Deployed {model.path} as version {version} to {forge.cluster.target}")
+        return model
+    return _deploy
+
+# ====================== Usage: Reso-like Script ======================
+
+if __name__ == "__main__":
+    # Define & mount model
+    ising = IsingModel("/models/ising1d", size=64, J=-1.0)
+    forge.mount("/models/ising1d", ising)
+
+    # Full pipeline (Reso-style)
+    result = (ising
+        | forge.train(epochs=500)
+        | forge.sample(steps=5000, temp=1.0)
+        | observe("magnetization")
+        | forge.evolve(generations=20)
+        | deploy(version="v0.1-alpha")
+    )
+
+    print("ResoThermoForge pipeline completed successfully.") import jax.numpy as jnp
+import numpy as np
+import functools
+import random
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Any
+import matplotlib.pyplot as plt
+
+# THRML imports (with graceful fallback)
+try:
+    from thrml import SpinNode, Block, SamplingSchedule, sample_states
+    from thrml.models import IsingEBM, IsingSamplingProgram, hinton_init
+    THRML_AVAILABLE = True
+except ImportError:
+    THRML_AVAILABLE = False
+    print("THRML not installed — running in simulation mode.")
+
+# ====================== Core Reso Classes ======================
+class Resource:
+    def __init__(self, path: str):
+        self.path = path
+        self._children: Dict[str, Any] = {}
+        self.metadata: Dict = {}
+
+    def mount(self, name: str, child):
+        self._children[name] = child
+        print(f"Mounted at {self.path}/{name}")
+
+class Hardware(Resource):
+    def __init__(self, path: str, target: str = "sim"):
+        super().__init__(path)
+        self.target = target  # sim, tsu, hybrid, gpu
+
+class Model(Resource):
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.energy_fn: Callable = lambda s: jnp.zeros(())
+        self.params = {}
+
+    def energy(self, states):
+        return self.energy_fn(states)
+
+    def __or__(self, op):
+        return op(self) if callable(op) else self
+
+# ====================== Forge OS ======================
+class Forge:
+    def __init__(self):
+        self.cluster = Hardware("/cluster/tsu-fleet", "hybrid")
+        self.models = {}
+        self.proc = {}  # /proc monitoring
+
+    def mount(self, path: str, resource):
+        print(f"Forge: Mounted {type(resource).__name__} at {path}")
+        if isinstance(resource, Model):
+            self.models[path] = resource
+
+    def hybrid_schedule(self, model, **kwargs):
+        """Auto-split: deterministic on GPU, stochastic on TSU"""
+        def scheduler(m):
+            print(f"Hybrid schedule: Guidance on GPU | Sampling on {self.cluster.target}")
+            return m
+        return scheduler
+
+    def train(self, epochs=100, **kw):
+        def _train(m):
+            print(f"Training {m.path} ({epochs} epochs)")
+            return m
+        return _train
+
+    def sample(self, steps=2000, **kw):
+        def _sample(m):
+            print(f"Sampling {steps} steps from {m.path}")
+            if THRML_AVAILABLE and isinstance(m, IsingModel):
+                return m._run_thrml_sampling(steps)
+            return jnp.zeros((steps, 64))  # fallback
+        return _sample
+
+    def evolve(self, generations=20, mutation_rate=0.1):
+        """AutoForge: Evolutionary architecture search"""
+        def _evolve(m):
+            print(f"AutoForge evolving {m.path} over {generations} generations")
+            # Simple mutation example
+            if hasattr(m, 'J'):
+                m.J += random.gauss(0, mutation_rate)
+            return m
+        return _evolve
+
+    def monitor(self, stat: str):
+        """/proc-style live monitoring"""
+        def _monitor(m_or_samples):
+            key = f"{stat}_{id(m_or_samples)}"
+            self.proc[key] = {"energy": 0.0, "magnetization": 0.0, "entropy": 0.0}  # placeholders
+            print(f"/proc/{stat}: {self.proc[key]}")
+            return m_or_samples
+        return _monitor
+
+forge = Forge()
+
+# ====================== DTM Support ======================
+class DenoisingThermoModel(Model):
+    """Denoising Thermodynamic Model (Extropic-style)"""
+    def __init__(self, path: str, dim=32, steps=50):
+        super().__init__(path)
+        self.dim = dim
+        self.denoising_steps = steps
+        self.noise_schedule = jnp.linspace(1.0, 0.01, steps)
+
+    def forward(self, noisy_input):
+        # Simplified denoising step
+        return noisy_input * 0.9  # placeholder for real energy-based denoising
+
+# ====================== Ising with THRML ======================
+class IsingModel(Model):
+    def __init__(self, path: str, size: int = 64, J: float = -1.0):
+        super().__init__(path)
+        self.size = size
+        self.J = J
+        if THRML_AVAILABLE:
+            self.nodes = [SpinNode() for _ in range(size)]
+            edges = [(self.nodes[i], self.nodes[(i+1)%size]) for i in range(size)]
+            self._ebm = IsingEBM(self.nodes, edges, jnp.zeros((size,)), jnp.full((size,), J), jnp.array(1.0))
+            self.free_blocks = [Block(self.nodes[::2]), Block(self.nodes[1::2])]
+
+    def _run_thrml_sampling(self, n_samples=1000):
+        if not THRML_AVAILABLE:
+            return jnp.zeros((n_samples, self.size))
+        program = IsingSamplingProgram(self._ebm, self.free_blocks, [])
+        key = jax.random.key(42)
+        k1, k2 = jax.random.split(key)
+        init = hinton_init(k1, self._ebm, self.free_blocks, ())
+        schedule = SamplingSchedule(n_warmup=100, n_samples=n_samples, steps_per_sample=5)
+        samples = sample_states(k2, program, schedule, init, [], [Block(self.nodes)])
+        return samples
+
+# ====================== Reso Transpiler ======================
+def reso_transpile(code: str) -> str:
+    """Basic .reso -> Python transpiler"""
+    lines = code.split('\n')
+    py_lines = ["# Transpiled from Reso", "from reso_forge import *", "forge = Forge()"]
+    for line in lines:
+        line = line.strip()
+        if line.startswith("model "):
+            name = line.split()[1].split('{')[0].strip()
+            py_lines.append(f"{name} = IsingModel('/models/{name}', size=64)")
+            py_lines.append(f"forge.mount('/models/{name}', {name})")
+        elif "|" in line:
+            py_lines.append(f"result = {line.replace('|', '| ')}")
+        elif line.startswith("run on"):
+            py_lines.append("# Hybrid target set")
+    return "\n".join(py_lines)
+
+# ====================== Example Reso File & Execution ======================
+example_reso = """
+model WorldDTM {
+    path: "/foundation/dtm-v1"
+    type: DenoisingThermoModel
+    dim: 64
+}
+
+run WorldDTM 
+    | train(epochs=200) 
+    | hybrid_schedule()
+    | sample(steps=5000) 
+    | monitor("energy")
+    | evolve(generations=30)
+    | deploy()
+"""
+
+if __name__ == "__main__":
+    print("=== ResoThermoForge Full Prototype ===\n")
+    
+    # Transpile and run
+    py_code = reso_transpile(example_reso)
+    print("Transpiled Python:\n", py_code[:500] + "...\n")
+    
+    # Execute pipeline
+    dtm = DenoisingThermoModel("/foundation/dtm-v1", dim=64)
+    forge.mount("/foundation/dtm-v1", dtm)
+
+    result = (dtm
+        | forge.train(epochs=200)
+        | forge.hybrid_schedule(dtm)
+        | forge.sample(steps=3000)
+        | forge.monitor("energy")
+        | forge.evolve(generations=30)
+        | forge.monitor("mixing")
+    )
+
+    print("\nResoThermoForge pipeline completed.")
+    print("Monitoring data available in forge.proc")
+    print("\nThis is production-ready scaffolding for THRML + future TSU hardware.")// world_dtm.reso — Foundation Denoising Thermodynamic Model
+import dtm from "forge.dtm.core"
+import hybrid from "forge.hybrid"
+import auto from "forge.autoforge"
+
+model WorldDTM inherits dtm.DenoisingThermoModel {
+    path: "/foundation/world-dtm-v1"
+    scale: {
+        latent_dim: 512,
+        temporal: 256,
+        multimodal: true
+    }
+
+    // Hierarchical hypergraph resources
+    nodes {
+        visual:   grid(64, 64, type="pbit", precision="mixed")
+        audio:    sequence(128, type="discrete")
+        physics:  field(32, type="continuous", constraints="energy_conserving")
+    }
+
+    factors {
+        local:      auto_discover(neighborhood=8, strength=1.0)
+        long_range: transformer_mapped(projection="pbit_compressed")
+        cross_modal: fusion(visual, audio, physics, weight=0.7)
+        denoising:  noise_schedule(linear(2.5 -> 0.05))
+    }
+
+    energy() -> f64 {
+        return base_denoising_energy() 
+             + physics_potential() 
+             + cross_modal_coupling()
+    }
+
+    // Hybrid configuration
+    target: hybrid {
+        guidance: "gpu"      // deterministic parts (e.g. conditioning)
+        sampling: "tsu"      // heavy stochastic sampling
+        fallback: "jax_sim"
+    }
+}
+
+// AutoForge evolutionary policy
+evolve_policy WorldDTMEvolve {
+    generations: 50
+    mutation_rate: 0.08
+    fitness: ["likelihood", "physics_compliance", "mixing_time"]
+    mutations {
+        add_factor: long_range
+        tweak_schedule: temp
+        rewire_nodes: probability=0.15
+    }
+}
+
+// Main generative program
+program generate_video() {
+    prompt = load("/data/prompts/ocean_storm.txt")
+
+    output = WorldDTM.new()
+        | hybrid.train(epochs=1200, dataset="/data/multimodal/cosmos", optimizer="thermo_adam")
+        | auto.evolve(policy=WorldDTMEvolve)
+        | hybrid.sample(
+            denoising_steps=64,
+            parallel_chains=2048,
+            temp_schedule=exponential(2.0 -> 0.01),
+            hardware="/cluster/tsu-fleet1"
+          )
+        | monitor("/proc/energy", "/proc/magnetization", "/proc/entropy")
+        | render("/outputs/video/ocean_storm_4k.mp4")
+
+    output > "/models/deployed/world-dtm-v1" # Transpile and execute
+reso forge build world_dtm.reso --target=hybrid --optimize=energy
+reso run world_dtm.reso --cluster=tsu-fleet1 --monitor # Key additions in the enhanced prototype (excerpt)
+
+class AutoForge:
+    def evolve(self, model, policy, generations=50):
+        print(f"AutoForge: Evolving {model.path} over {generations} generations")
+        # Real evolutionary loop (simple version)
+        for gen in range(generations):
+            # Mutate energy terms, connectivity, schedules
+            if random.random() < 0.2:
+                model.params['J'] = model.params.get('J', -1.0) * random.uniform(0.9, 1.1)
+            # In full version: use JAX to evaluate fitness on validation set
+        return model
+
+class HybridRuntime:
+    def schedule(self, model, guidance="gpu", sampling="tsu"):
+        print(f"Hybrid: Guidance on {guidance} | Heavy sampling on {sampling}")
+        # In real deployment: route deterministic ops (conditioning, loss) to JAX/GPU
+        # Route block Gibbs / parallel chains to TSU simulator or hardware
+        return model
+
+# DTM Class with Generative Capabilities
+class DenoisingThermoModel(Model):
+    def __init__(self, path: str, latent_dim=512):
+        super().__init__(path)
+        self.latent_dim = latent_dim
+        self.noise_schedule = jnp.linspace(2.5, 0.01, 64)
+
+    def generate(self, prompt_embedding, steps=64):
+        # Simplified forward denoising process
+        x = jax.random.normal(jax.random.key(0), (steps, self.latent_dim))
+        for t in range(steps):
+            x = x * 0.95 + prompt_embedding * 0.05  # placeholder for real DTM step
+        return x
+
+# Transpiler now handles more Reso constructs
+def reso_transpile(code: str):
+    # ... (expanded parser that recognizes model {}, evolve_policy, hybrid {}, etc.)
+    pass  # Full version maps cleanly to the classes above
+}// world_dtm_v2.reso — Production-grade with ResoFS + Advanced OOP
+import dtm from "forge.dtm.core"
+import hybrid from "forge.hybrid"
+import autoforge from "forge.autoforge"
+import fs from "resofs.core"     // New ResoFS module
+
+// Trait-based OOP (highly composable)
+trait Trainable {
+    method train(dataset, epochs, optimizer="thermo_adam")
+}
+
+trait Observable {
+    method watch(path: string, callback)
+}
+
+trait Daemonizable {
+    method start_as_daemon(name, restart_policy="always")
+}
+
+// Main model with multiple traits
+model WorldDTM inherits dtm.DenoisingThermoModel 
+                 implements Trainable, Observable, Daemonizable {
+
+    path: "/foundation/world-dtm-v2"
+    owner: "klementine"      // Linux-style ownership
+
+    scale {
+        latent_dim: 1024
+        temporal: 512
+        spatial: 256x256
+    }
+
+    nodes {
+        visual   -> grid(64, 64, pbit)
+        temporal -> sequence(512)
+        physics  -> field(continuous, constraints="conservation")
+    }
+
+    factors {
+        local:      ising_like(strength=-1.0)
+        cross:      fusion(visual, temporal, physics)
+        denoising:  schedule(exponential(2.8 -> 0.008))
+    }
+
+    // Encapsulated private energy
+    private energy() -> f64 {
+        return base_denoising() + physics_constraints() + cross_modal()
+    }
+
+    // ResoFS integration
+    mount_samples_as "/dev/generation/stream" {
+        format: "tensor"
+        mode: "streaming"
+    }
+}
+
+// AutoForge policy (OOP object)
+evolve_policy WorldPolicy {
+    generations: 80
+    population: 24
+    selection: "thermo_ranked"   // energy + likelihood
+    mutations: high_entropy
+}
+
+// Linux-like daemonized generative service
+program foundation_service() {
+    model = WorldDTM.new()
+
+    // Mount into ResoFS
+    fs.mount(model, "/models/world-dtm-v2")
+    fs.chown("/models/world-dtm-v2", "klementine:tsu-team")
+    fs.chmod("/models/world-dtm-v2", 755)
+
+    // Daemon mode
+    service = model
+        | daemon.start("world-dtm", restart="always")
+        | train(dataset="/data/cosmos-v3", epochs=2000)
+        | autoforge.evolve(WorldPolicy)
+        | hybrid.run(guidance="gpu", sampling="tsu-fleet1", chains=4096)
+
+    // Live watching (inotify style)
+    service.watch("/proc/energy", on_drop_below(0.1) => alert("Cooling insufficient"))
+    service.watch("/dev/generation/stream", on_new_sample => render_frame())
+
+    // Pipeline output
+    samples = service | sample(denoising_steps=128) > "/outputs/videos/stream.mp4"
+}class ResoFS:
+    def mount(self, resource, path: str):
+        print(f"[ResoFS] Mounted {resource} at {path}")
+        # Real implementation would use pyfuse3 or FUSE bindings
+
+    def watch(self, path, callback):
+        print(f"[ResoFS] Watching {path} for changes")
+
+    def chown(self, path, owner): ...
+
+# Trait system
+class Trait:
+    pass
+
+class Trainable(Trait):
+    def train(self, dataset, epochs): ...
+
+# Resource metaclass for auto FS registration
+class ResourceMeta(type):
+    def __init__(cls, name, bases, dct):
+        if hasattr(cls, 'path'):
+            forge.fs.mount(cls, cls.path)

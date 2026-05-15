@@ -1,0 +1,2 @@
+[console_scripts]
+reso-demo = reso_demo:main

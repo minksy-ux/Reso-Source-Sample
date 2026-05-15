@@ -1,0 +1,7 @@
+Sample summary:
+- steps: 5
+- chain length: 100
+- mean magnetization: 0.09600
+- std magnetization: 0.01497
+- mean energy: 3.20000
+- energy std: 2.99333
